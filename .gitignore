@@ -1,0 +1,8 @@
+.env
+__pycache__/
+venv/
+env/
+voice_env/
+*.wav
+*.mp3
+*.db
