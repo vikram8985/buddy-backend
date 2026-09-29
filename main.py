@@ -3,9 +3,11 @@ import time
 import sqlite3
 import urllib.parse
 import io
+import httpx
 
 import uvicorn
 import edge_tts
+from duckduckgo_search import DDGS
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -27,12 +29,9 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
-MODEL = "openai/gpt-oss-20b"
+MODEL = "llama-3.3-70b-versatile"
 
-# English voice
 ENGLISH_VOICE = "en-IN-NeerjaNeural"
-
-# Telugu voice
 TELUGU_VOICE = "te-IN-ShrutiNeural"
 
 DATABASE = "buddy_memory.db"
@@ -46,7 +45,7 @@ app = FastAPI(title="BUDDY AI")
 
 
 # ============================================================
-# DATABASE
+# DATABASE & MEMORY
 # ============================================================
 
 def get_connection():
@@ -85,7 +84,7 @@ def save_message(role: str, content: str):
     conn.close()
 
 
-def get_memory(limit: int = 4): # Reduced memory limit for speed
+def get_memory(limit: int = 4):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -98,11 +97,48 @@ def get_memory(limit: int = 4): # Reduced memory limit for speed
     return rows
 
 
+# ============================================================
+# INTEGRATIONS (WEATHER & SEARCH)
+# ============================================================
+
+async def get_weather(city: str = "Hyderabad") -> str:
+    """Free Weather API without API Keys"""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as http_client:
+            geo_res = await http_client.get(f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1")
+            geo_data = geo_res.json()
+            if not geo_data.get("results"):
+                return "Weather data not found."
+            
+            lat = geo_data["results"][0]["latitude"]
+            lon = geo_data["results"][0]["longitude"]
+            
+            w_res = await http_client.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true")
+            w_data = w_res.json()["current_weather"]
+            return f"Current weather in {city}: {w_data['temperature']}°C, Wind speed: {w_data['windspeed']} km/h."
+    except Exception as e:
+        print(f"Weather error: {e}")
+        return ""
+
+
+def search_web(query: str) -> str:
+    """Free Live Search & News"""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=2))
+            if results:
+                return "\n".join([r['body'] for r in results])
+    except Exception as e:
+        print(f"Search error: {e}")
+    return ""
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
 def contains_telugu(text: str) -> bool:
-    return any(
-        "\u0C00" <= char <= "\u0C7F"
-        for char in text
-    )
+    return any("\u0C00" <= char <= "\u0C7F" for char in text)
 
 
 def choose_voice(text: str) -> str:
@@ -144,24 +180,35 @@ async def chat(request: ChatRequest):
         save_message("user", user_message)
         memory = get_memory(4)
 
-        # Optimized lighter system prompt for speed
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are BUDDY, Vikram's fast AI assistant. "
-                    "Match user's language (English, Telugu, or mixed). "
-                    "Be concise for short questions, and detailed only when asked. "
-                    "Never use |||."
-                )
-            }
-        ]
+        # ----------------------------------------------------
+        # WEATHER / SEARCH CHECK
+        # ----------------------------------------------------
+        lower_msg = user_message.lower()
+        extra_context = ""
+
+        if "weather" in lower_msg or "వాతావరణం" in lower_msg:
+            extra_context = await get_weather("Hyderabad")
+        elif any(k in lower_msg for k in ["news", "search", "వార్తలు", "తాజా", "who is", "what is"]):
+            extra_context = search_web(user_message)
+
+        # System prompt with punctuation guidance for natural TTS
+        system_content = (
+            "You are BUDDY, Vikram's intelligent personal assistant. "
+            "Match user's language (English, Telugu, or mixed). "
+            "Use natural sentence pauses, commas, and full stops so speech output sounds natural and human-like. "
+            "Be concise for short questions, and never use |||."
+        )
+
+        if extra_context:
+            system_content += f"\nReal-time live information context: {extra_context}"
+
+        messages = [{"role": "system", "content": system_content}]
 
         for role, content in memory:
             messages.append({"role": role, "content": content})
 
         # ----------------------------------------------------
-        # GROQ
+        # GROQ AI
         # ----------------------------------------------------
         t_llm = time.time()
 
@@ -169,7 +216,7 @@ async def chat(request: ChatRequest):
             model=MODEL,
             messages=messages,
             temperature=0.5,
-            max_tokens=150  # Reduced max tokens to prevent long essays & speed up TTS
+            max_tokens=200
         )
 
         llm_time = time.time() - t_llm
@@ -187,14 +234,17 @@ async def chat(request: ChatRequest):
         selected_voice = choose_voice(raw_output)
 
         # ----------------------------------------------------
-        # TTS IN-MEMORY GENERATION (FAST)
+        # TTS GENERATION (Tuned Rate for Natural Voice)
         # ----------------------------------------------------
         t_tts = time.time()
+
+        # Telugu ki rate="-3%" వాడడం వల్ల శ్రుతి వాయిస్ చాలా ప్రశాంతంగా, Natural గా మాట్లాడుతుంది
+        speech_rate = "-3%" if selected_voice == TELUGU_VOICE else "+0%"
 
         communicate = edge_tts.Communicate(
             raw_output,
             selected_voice,
-            rate="+10%",
+            rate=speech_rate,
             pitch="+0Hz"
         )
 
@@ -226,4 +276,4 @@ async def chat(request: ChatRequest):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=10000)
