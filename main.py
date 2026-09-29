@@ -29,7 +29,7 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
-MODEL = "llama-3.1-8b-instant"
+MODEL = "openai/gpt-oss-20b"
 
 ENGLISH_VOICE = "en-IN-NeerjaNeural"
 TELUGU_VOICE = "te-IN-ShrutiNeural"
