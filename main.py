@@ -1,7 +1,8 @@
 import os
 import time
 import sqlite3
-import urllib.parse
+import json
+import base64
 import io
 import httpx
 
@@ -10,9 +11,8 @@ import edge_tts
 from duckduckgo_search import DDGS
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, Form
+from fastapi.responses import JSONResponse
 from groq import Groq
 
 
@@ -41,7 +41,7 @@ DATABASE = "buddy_memory.db"
 # FASTAPI
 # ============================================================
 
-app = FastAPI(title="BUDDY AI")
+app = FastAPI(title="BUDDY AI - Live Engine")
 
 
 # ============================================================
@@ -69,10 +69,6 @@ def init_db():
 init_db()
 
 
-class ChatRequest(BaseModel):
-    message: str
-
-
 def save_message(role: str, content: str):
     conn = get_connection()
     cursor = conn.cursor()
@@ -98,7 +94,7 @@ def get_memory(limit: int = 4):
 
 
 # ============================================================
-# INTEGRATIONS (WEATHER & SEARCH)
+# INTEGRATIONS (WEATHER, SEARCH & IMAGES)
 # ============================================================
 
 async def get_weather(city: str = "Hyderabad") -> str:
@@ -121,16 +117,25 @@ async def get_weather(city: str = "Hyderabad") -> str:
         return ""
 
 
-def search_web(query: str) -> str:
-    """Free Live Search & News"""
+def search_web_and_images(query: str):
+    """Free Live Search Text & Image URLs"""
+    search_text = ""
+    image_urls = []
     try:
         with DDGS() as ddgs:
+            # 1. Fetch Text Results
             results = list(ddgs.text(query, max_results=2))
             if results:
-                return "\n".join([r['body'] for r in results])
+                search_text = "\n".join([r['body'] for r in results])
+            
+            # 2. Fetch Image Results
+            img_results = list(ddgs.images(query, max_results=4))
+            for img in img_results:
+                image_urls.append(img['image'])
     except Exception as e:
         print(f"Search error: {e}")
-    return ""
+        
+    return search_text, image_urls
 
 
 # ============================================================
@@ -147,102 +152,80 @@ def choose_voice(text: str) -> str:
     return ENGLISH_VOICE
 
 
-def clean_response(text: str) -> str:
-    text = text.strip()
-    text = text.replace("|||", " ")
-    text = (
-        text.replace("’", "'")
-            .replace("‘", "'")
-            .replace("“", '"')
-            .replace("”", '"')
-            .replace("—", "-")
-    )
-    return text.strip()
-
-
 # ============================================================
-# CHAT ENDPOINT
+# LIVE CHAT ENDPOINT (JSON + AUDIO + IMAGES)
 # ============================================================
 
 @app.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(message: str = Form(...)):
 
     t_start = time.time()
-    user_message = request.message.strip()
+    user_message = message.strip()
 
     if not user_message:
-        return JSONResponse(
-            {"reply": "Em matladaledu Vikram."},
-            status_code=400
-        )
+        return JSONResponse({"error": "Em matladaledu Vikram."}, status_code=400)
 
     try:
         save_message("user", user_message)
         memory = get_memory(4)
 
-        # ----------------------------------------------------
-        # WEATHER / SEARCH CHECK
-        # ----------------------------------------------------
+        # Weather / Search Check
         lower_msg = user_message.lower()
         extra_context = ""
+        image_urls = []
 
         if "weather" in lower_msg or "వాతావరణం" in lower_msg:
             extra_context = await get_weather("Hyderabad")
-        elif any(k in lower_msg for k in ["news", "search", "వార్తలు", "తాజా", "who is", "what is"]):
-            extra_context = search_web(user_message)
+        else:
+            # Always perform search for current query context and image extraction
+            extra_context, image_urls = search_web_and_images(user_message)
 
-        # System prompt with punctuation guidance for natural TTS
+        # System Prompt returning JSON for UI display + speech
         system_content = (
             "You are BUDDY, Vikram's intelligent personal assistant. "
             "Match user's language (English, Telugu, or mixed). "
-            "Use natural sentence pauses, commas, and full stops so speech output sounds natural and human-like. "
-            "Be concise for short questions, and never use |||."
+            "Use natural sentence pauses, commas, and full stops so speech output sounds human. "
+            "Return output STRICTLY in JSON format:\n"
+            "{\n"
+            '  "speech_reply": "Natural voice reply for user",\n'
+            '  "display_title": "Clean concise title for UI screen",\n'
+            '  "display_text": "Detailed structured response text for display card"\n'
+            "}"
         )
 
         if extra_context:
-            system_content += f"\nReal-time live information context: {extra_context}"
+            system_content += f"\nReal-time live info context: {extra_context}"
 
         messages = [{"role": "system", "content": system_content}]
 
         for role, content in memory:
             messages.append({"role": role, "content": content})
 
-        # ----------------------------------------------------
-        # GROQ AI
-        # ----------------------------------------------------
-        t_llm = time.time()
-
+        # LLM Completion
         completion = client.chat.completions.create(
             model=MODEL,
             messages=messages,
+            response_format={"type": "json_object"},
             temperature=0.5,
-            max_tokens=200
+            max_tokens=1000
         )
 
-        llm_time = time.time() - t_llm
-        print(f"✅ Groq answered in {llm_time:.2f}s")
+        raw_json = completion.choices[0].message.content or "{}"
+        response_data = json.loads(raw_json)
 
-        raw_output = completion.choices[0].message.content or ""
-        raw_output = clean_response(raw_output)
+        speech_text = response_data.get("speech_reply", "Ha Vikram, cheppu!")
+        display_title = response_data.get("display_title", "Buddy Assistant")
+        display_text = response_data.get("display_text", speech_text)
 
-        if not raw_output:
-            raw_output = "Ha Vikram, cheppu! Nenu ready ga unna."
+        save_message("assistant", speech_text)
+        print(f"🤖 Buddy Speech: {speech_text}")
 
-        save_message("assistant", raw_output)
-        print(f"🤖 Buddy: {raw_output}")
-
-        selected_voice = choose_voice(raw_output)
-
-        # ----------------------------------------------------
-        # TTS GENERATION (Tuned Rate for Natural Voice)
-        # ----------------------------------------------------
-        t_tts = time.time()
-
-        # Telugu ki rate="-3%" వాడడం వల్ల శ్రుతి వాయిస్ చాలా ప్రశాంతంగా, Natural గా మాట్లాడుతుంది
+        # TTS Audio Generation
+        selected_voice = choose_voice(speech_text)
         speech_rate = "-3%" if selected_voice == TELUGU_VOICE else "+0%"
 
         communicate = edge_tts.Communicate(
-            raw_output,
+            speech_text,
             selected_voice,
             rate=speech_rate,
             pitch="+0Hz"
@@ -253,22 +236,19 @@ async def chat(request: ChatRequest):
             if chunk["type"] == "audio":
                 audio_buffer.write(chunk["data"])
 
-        audio_buffer.seek(0)
-        tts_time = time.time() - t_tts
-        total_time = time.time() - t_start
+        audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
 
-        print(f"✅ Voice ready in {tts_time:.2f}s")
+        total_time = time.time() - t_start
         print(f"⚡ Total Server Time: {total_time:.2f}s\n")
 
-        encoded_display = urllib.parse.quote(raw_output)
-
-        return StreamingResponse(
-            audio_buffer,
-            media_type="audio/mp3",
-            headers={
-                "X-Reply": encoded_display
-            }
-        )
+        # JSON payload matching Flutter UI requirements
+        return JSONResponse({
+            "speech_text": speech_text,
+            "display_title": display_title,
+            "display_text": display_text,
+            "images": image_urls,
+            "audio_base64": audio_base64
+        })
 
     except Exception as e:
         print("❌ Error inside main.py:", e)
