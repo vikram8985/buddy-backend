@@ -5,3 +5,4 @@ edge-tts
 python-dotenv
 duckduckgo_search
 httpx
+pydantic
