@@ -1,9 +1,7 @@
 fastapi
 uvicorn
-groq
 edge-tts
 python-dotenv
-duckduckgo_search
 httpx
 pydantic
 python-multipart
