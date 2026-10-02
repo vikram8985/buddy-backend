@@ -8,13 +8,11 @@ import httpx
 
 import uvicorn
 import edge_tts
-from duckduckgo_search import DDGS
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
-from groq import Groq
 
 
 # ============================================================
@@ -23,14 +21,12 @@ from groq import Groq
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY is missing in your .env file.")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is missing in your .env file.")
 
-client = Groq(api_key=GROQ_API_KEY)
-
-MODEL = "openai/gpt-oss-20b"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
 ENGLISH_VOICE = "en-IN-NeerjaNeural"
 TELUGU_VOICE = "te-IN-ShrutiNeural"
@@ -42,7 +38,7 @@ DATABASE = "buddy_memory.db"
 # FASTAPI
 # ============================================================
 
-app = FastAPI(title="BUDDY AI - Live Engine")
+app = FastAPI(title="BUDDY AI - Pure Gemini Engine")
 
 
 # ============================================================
@@ -95,13 +91,12 @@ def get_memory(limit: int = 4):
 
 
 # ============================================================
-# INTEGRATIONS (WEATHER, SEARCH & IMAGES)
+# INTEGRATIONS (WEATHER ONLY)
 # ============================================================
 
-async def get_weather(city: str = "Hyderabad") -> str:
-    """Free Weather API without API Keys"""
+async def get_weather(city: str = "Gorantla") -> str:
     try:
-        async with httpx.AsyncClient(timeout=3.0) as http_client:
+        async with httpx.AsyncClient(timeout=2.0) as http_client:
             geo_res = await http_client.get(f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1")
             geo_data = geo_res.json()
             if not geo_data.get("results"):
@@ -116,27 +111,6 @@ async def get_weather(city: str = "Hyderabad") -> str:
     except Exception as e:
         print(f"Weather error: {e}")
         return ""
-
-
-def search_web_and_images(query: str):
-    """Free Live Search Text & Image URLs"""
-    search_text = ""
-    image_urls = []
-    try:
-        with DDGS() as ddgs:
-            # 1. Fetch Text Results
-            results = list(ddgs.text(query, max_results=2))
-            if results:
-                search_text = "\n".join([r['body'] for r in results])
-            
-            # 2. Fetch Image Results
-            img_results = list(ddgs.images(query, max_results=4))
-            for img in img_results:
-                image_urls.append(img['image'])
-    except Exception as e:
-        print(f"Search error: {e}")
-        
-    return search_text, image_urls
 
 
 # ============================================================
@@ -154,7 +128,7 @@ def choose_voice(text: str) -> str:
 
 
 # ============================================================
-# LIVE CHAT ENDPOINT (JSON + AUDIO + IMAGES)
+# LIVE CHAT ENDPOINT
 # ============================================================
 class ChatRequest(BaseModel):
     message: str
@@ -173,48 +147,57 @@ async def chat(request: ChatRequest):
         save_message("user", user_message)
         memory = get_memory(4)
 
-        # Weather / Search Check
         lower_msg = user_message.lower()
         extra_context = ""
-        image_urls = []
 
         if "weather" in lower_msg or "వాతావరణం" in lower_msg:
-            extra_context = await get_weather("Hyderabad")
-        else:
-            # Always perform search for current query context and image extraction
-            extra_context, image_urls = search_web_and_images(user_message)
+            extra_context = await get_weather("Gorantla")
 
-        # System Prompt returning JSON for UI display + speech
         system_content = (
             "You are BUDDY, Vikram's intelligent personal assistant. "
-            "Match user's language (English, Telugu, or mixed). "
-            "Use natural sentence pauses, commas, and full stops so speech output sounds human. "
-            "Return output STRICTLY in JSON format:\n"
+            "Match user's language (English, Telugu, or mixed). Be crisp, fast, and smart. "
+            "Return output STRICTLY in valid JSON format:\n"
             "{\n"
-            '  "speech_reply": "Natural voice reply for user",\n'
-            '  "display_title": "Clean concise title for UI screen",\n'
-            '  "display_text": "Detailed structured response text for display card"\n'
+            '  "speech_reply": "Natural short voice reply",\n'
+            '  "display_title": "Short title",\n'
+            '  "display_text": "Detailed response text"\n'
             "}"
         )
 
         if extra_context:
-            system_content += f"\nReal-time live info context: {extra_context}"
+            system_content += f"\nLive info context: {extra_context}"
 
-        messages = [{"role": "system", "content": system_content}]
-
+        contents = []
         for role, content in memory:
-            messages.append({"role": role, "content": content})
+            role_label = "user" if role == "user" else "model"
+            contents.append({
+                "role": role_label,
+                "parts": [{"text": content}]
+            })
+        
+        contents.append({
+            "role": "user",
+            "parts": [{"text": f"{system_content}\n\nUser Message: {user_message}"}]
+        })
 
-        # LLM Completion
-        completion = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.5,
-            max_tokens=1000
-        )
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            gemini_response = await client.post(
+                GEMINI_URL,
+                json={
+                    "contents": contents,
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.4,
+                        "maxOutputTokens": 400
+                    }
+                }
+            )
 
-        raw_json = completion.choices[0].message.content or "{}"
+        if gemini_response.status_code != 200:
+            raise Exception(f"Gemini API Error: {gemini_response.text}")
+
+        res_data = gemini_response.json()
+        raw_json = res_data["candidates"][0]["content"]["parts"][0]["text"]
         response_data = json.loads(raw_json)
 
         speech_text = response_data.get("speech_reply", "Ha Vikram, cheppu!")
@@ -222,7 +205,6 @@ async def chat(request: ChatRequest):
         display_text = response_data.get("display_text", speech_text)
 
         save_message("assistant", speech_text)
-        print(f"🤖 Buddy Speech: {speech_text}")
 
         # TTS Audio Generation
         selected_voice = choose_voice(speech_text)
@@ -243,19 +225,18 @@ async def chat(request: ChatRequest):
         audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
 
         total_time = time.time() - t_start
-        print(f"⚡ Total Server Time: {total_time:.2f}s\n")
+        print(f"⚡ Total Server Time: {total_time:.2f}s")
 
-        # JSON payload matching Flutter UI requirements
         return JSONResponse({
             "speech_text": speech_text,
             "display_title": display_title,
             "display_text": display_text,
-            "images": image_urls,
+            "images": [],
             "audio_base64": audio_base64
         })
 
     except Exception as e:
-        print("❌ Error inside main.py:", e)
+        print("❌ Error:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
