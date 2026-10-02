@@ -11,7 +11,8 @@ import edge_tts
 from duckduckgo_search import DDGS
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form
+from fastapi import FastAPI
+form pydantic import BaseModel
 from fastapi.responses import JSONResponse
 from groq import Groq
 
@@ -155,12 +156,15 @@ def choose_voice(text: str) -> str:
 # ============================================================
 # LIVE CHAT ENDPOINT (JSON + AUDIO + IMAGES)
 # ============================================================
+class ChatRequest(BaseModel):
+    message: str
 
+    
 @app.post("/chat")
-async def chat(message: str = Form(...)):
+async def chat(request: ChatRequest):
 
     t_start = time.time()
-    user_message = message.strip()
+    user_message = request.message.strip()
 
     if not user_message:
         return JSONResponse({"error": "Em matladaledu Vikram."}, status_code=400)
