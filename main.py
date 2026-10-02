@@ -12,7 +12,7 @@ from duckduckgo_search import DDGS
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-form pydantic import BaseModel
+from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 from groq import Groq
 
